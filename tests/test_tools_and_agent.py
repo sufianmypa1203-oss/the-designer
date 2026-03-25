@@ -288,3 +288,64 @@ class TestAgentScopeGuards:
         prompt = v.build_llm_evaluator_prompt("brief", "visual", "typo")
         assert len(prompt) > 100
         assert "JSON" in prompt
+
+
+# ─── Evaluator Score Parsing Tests ───────────────────────────────────────────
+
+class TestParseEvaluatorScores:
+    """Tests for _parse_evaluator_scores — the M3 fix."""
+
+    @pytest.fixture
+    def agent(self, tmp_path):
+        from designer.agent import DesignerAgent
+        return DesignerAgent(
+            project_id="test",
+            specs_dir=tmp_path / "specs",
+            prototypes_dir=tmp_path / "protos",
+        )
+
+    def test_all_pass_returns_empty(self, agent):
+        response = '{"color": 9, "typography": 8, "focal": 7, "depth": 9, "emotion": 8, "craft": 10}'
+        issues = agent._parse_evaluator_scores(response)
+        assert issues == []
+
+    def test_low_score_blocks(self, agent):
+        response = '{"color": 6, "typography": 8, "focal": 7, "depth": 9, "emotion": 8, "craft": 10}'
+        issues = agent._parse_evaluator_scores(response)
+        assert len(issues) == 1
+        assert "BLOCKED" in issues[0]
+        assert "'color'" in issues[0]
+        assert "6/10" in issues[0]
+
+    def test_multiple_low_scores_block(self, agent):
+        response = '{"color": 3, "typography": 2, "focal": 7, "depth": 9, "emotion": 8, "craft": 10}'
+        issues = agent._parse_evaluator_scores(response)
+        assert len(issues) == 2
+
+    def test_missing_dimension_reports(self, agent):
+        response = '{"color": 9, "typography": 8}'
+        issues = agent._parse_evaluator_scores(response)
+        assert len(issues) == 4  # 4 missing dims
+        assert any("Missing score" in i for i in issues)
+
+    def test_non_json_response_reports(self, agent):
+        response = "I think the design looks great!"
+        issues = agent._parse_evaluator_scores(response)
+        assert len(issues) == 1
+        assert "non-JSON" in issues[0]
+
+    def test_non_dict_json_reports(self, agent):
+        response = '["color", "typography"]'
+        issues = agent._parse_evaluator_scores(response)
+        assert len(issues) == 1
+        assert "non-object" in issues[0]
+
+    def test_markdown_fenced_json_parsed(self, agent):
+        response = '```json\n{"color": 9, "typography": 8, "focal": 7, "depth": 9, "emotion": 8, "craft": 10}\n```'
+        issues = agent._parse_evaluator_scores(response)
+        assert issues == []
+
+    def test_boundary_score_7_passes(self, agent):
+        response = '{"color": 7, "typography": 7, "focal": 7, "depth": 7, "emotion": 7, "craft": 7}'
+        issues = agent._parse_evaluator_scores(response)
+        assert issues == []

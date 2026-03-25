@@ -285,7 +285,8 @@ class DesignerAgent:
     async def _llm_evaluator_pass(self) -> list[str]:
         """
         Dedicated LLM evaluator call. SEPARATE from the Designer agent.
-        Returns structured list of violations.
+        Expects JSON: {"color": 8, "typography": 9, "focal": 7, "depth": 8, "emotion": 7, "craft": 8}
+        Returns list of violation strings. Any dimension <7 is a blocking issue.
         """
         brief_text = ""
         visual_spec_text = ""
@@ -318,13 +319,71 @@ class DesignerAgent:
                     result_text = message.result
                     break
 
-            try:
-                return json.loads(result_text.strip())
-            except json.JSONDecodeError:
-                return []
+            return self._parse_evaluator_scores(result_text)
 
         except ImportError:
             return []
+
+    def _parse_evaluator_scores(self, result_text: str) -> list[str]:
+        """
+        Parse LLM evaluator response — expects scored JSON:
+        {"color": 8, "typography": 9, "focal": 7, "depth": 8, "emotion": 7, "craft": 8}
+
+        Returns list of violation strings. Any score <7 triggers a blocking issue.
+        """
+        EXPECTED_DIMS = {"color", "typography", "focal", "depth", "emotion", "craft"}
+        MIN_SCORE = 7
+
+        # Extract JSON from response (may be wrapped in markdown code blocks)
+        text = result_text.strip()
+        if "```" in text:
+            # Strip markdown fencing
+            lines = text.split("\n")
+            json_lines = []
+            in_block = False
+            for line in lines:
+                if line.strip().startswith("```"):
+                    in_block = not in_block
+                    continue
+                if in_block:
+                    json_lines.append(line)
+            text = "\n".join(json_lines).strip()
+
+        try:
+            scores = json.loads(text)
+        except json.JSONDecodeError:
+            self.hooks.log_event(
+                "LLM_EVALUATOR_PARSE_ERROR",
+                raw_response=result_text[:200],
+            )
+            return ["LLM evaluator returned non-JSON response — manual review needed"]
+
+        if not isinstance(scores, dict):
+            return ["LLM evaluator returned non-object JSON — expected {dim: score}"]
+
+        issues: list[str] = []
+
+        # Check each dimension
+        for dim in EXPECTED_DIMS:
+            score = scores.get(dim)
+            if score is None:
+                issues.append(f"Missing score for '{dim}' — evaluator response incomplete")
+            elif not isinstance(score, (int, float)):
+                issues.append(f"Invalid score for '{dim}': {score} — expected number 0-10")
+            elif score < MIN_SCORE:
+                issues.append(
+                    f"BLOCKED: '{dim}' scored {score}/10 (minimum {MIN_SCORE}). "
+                    f"Optimizer pass required."
+                )
+
+        # Log all scores for observability
+        self.hooks.log_event(
+            "LLM_EVALUATOR_SCORES",
+            scores=str(scores),
+            blocked=len(issues) > 0,
+        )
+
+        return issues
 
     async def _optimizer_pass(self, issues: list) -> AsyncIterator[str]:
         """Re-run generation with specific failure context."""
