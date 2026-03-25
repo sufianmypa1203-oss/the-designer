@@ -7,7 +7,7 @@
     <a href="#architecture"><img src="https://img.shields.io/badge/architecture-evaluator_optimizer-blueviolet?style=for-the-badge" alt="Architecture"></a>
     <a href="#contracts"><img src="https://img.shields.io/badge/contracts-pydantic_v2-e92063?style=for-the-badge" alt="Pydantic v2"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License"></a>
-    <a href="#tests"><img src="https://img.shields.io/badge/tests-80_passing-brightgreen?style=for-the-badge" alt="Tests"></a>
+    <a href="#tests"><img src="https://img.shields.io/badge/tests-142_passing-brightgreen?style=for-the-badge" alt="Tests"></a>
     <a href="#"><img src="https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+"></a>
     <a href="#"><img src="https://img.shields.io/badge/WCAG-AA_compliant-00695c?style=for-the-badge" alt="WCAG AA"></a>
   </p>
@@ -31,7 +31,7 @@ This is not a prompt document. It is a **production-grade agent** with 11 Pydant
 | Canvas scaling | "Remember to multiply by 3" | `@model_validator` raises on any `canvas ≠ prototype × 3` |
 | Design contracts | JSON templates | 11 Pydantic models — `ValidationError` at generation time |
 | Typography | "Use a type scale" | Weight contrast ≥300 enforced, min font sizes per role |
-| Validation | Manual review | `DesignValidator` — 12 deterministic checks + LLM evaluator |
+| Validation | Manual review | `DesignValidator` — 15 deterministic checks + 0-10 scoring evaluator (6 dims, <7 blocks) |
 | Error recovery | None | `_optimizer_pass()` re-runs with failure context |
 | Depth layers | "Add some depth" | ≥2 layers per scene enforced, z-index ordering validated |
 | Element tracking | DOM inspection | Every element: `data-element-id`, `data-layer`, geometry registered |
@@ -60,7 +60,7 @@ flowchart TB
     end
 
     subgraph VALIDATION["🔍 6-Layer QA + Evaluator-Optimizer"]
-        E & F & G & H --> I["12 Deterministic Checks"]
+        E & F & G & H --> I["15 Deterministic Checks"]
         I --> J["6-Layer QA Pass"]
         J --> K["LLM Evaluator"]
         K --> L{Issues?}
@@ -234,10 +234,13 @@ After generating all design artifacts, a **separate validation pass** runs:
 6. **Canvas** — Every measurement = prototype × 3
 7. **Depth** — ≥2 layers per scene
 8. **Focal** — Not a logo in hook scenes
-9. **Elements** — Globally unique IDs across all prototypes
-10. **Prototype coverage** — One HTML per scene
-11. **6-Layer QA** — Concept, Typography, Color, Space, Emotion, Craft
-12. **LLM Evaluator** — Semantic visual quality check
+9. **Color count** — Detects duplicate colors across 60-30-10 roles
+10. **Live contrast recalc** — Re-derives WCAG ratios from raw hex values
+11. **Canvas scaling spot-check** — Re-verifies ×3 from raw JSON
+12. **Weight contrast** — ≥300 weight difference cross-checked from typography spec
+13. **Element IDs unique** — Globally unique across all prototypes
+14. **Text-script match** — Cross-refs typography text against `02-script.md`
+15. **LLM Evaluator** — 0-10 scoring on 6 dimensions (any <7 blocks handoff)
 
 ```python
 from designer import DesignValidator
@@ -284,12 +287,18 @@ the-designer/
 │       ├── __init__.py                ← Package exports (all 11 models + utils)
 │       ├── agent.py                   ← DesignerAgent class (async SDK loop)
 │       ├── models.py                  ← Pydantic contracts (THE source of truth)
-│       ├── validator.py               ← DesignValidator (12 checks + LLM evaluator)
-│       ├── tools.py                   ← ACI-engineered tools (8 tools)
+│       ├── validator.py               ← DesignValidator (15 checks + 0-10 scoring evaluator)
+│       ├── tools.py                   ← ACI-engineered tools (8 tools, viewport-validated)
 │       ├── prompts.py                 ← System prompt (XML-structured)
 │       └── color_utils.py             ← WCAG contrast calculator, hex parser
 │
-├── knowledge/
+├── knowledge/                         ← 12-file knowledge base
+│   ├── emotion_design_matrix.md       ← 9 emotions → visual params (HSL, depth, shapes)
+│   ├── component_registry.md          ← 14 components with Designer properties
+│   ├── design_system_tokens.md        ← Type scales, spacing, color tokens
+│   ├── canvas_scaling_cheatsheet.md   ← ×3 rules and reference tables
+│   ├── prototype_reference_library.md ← HTML prototype templates
+│   ├── anti_patterns.md               ← Design mistakes to avoid
 │   ├── color_theory.md                ← 60-30-10, WCAG, color psychology
 │   ├── visual_psychology.md           ← Gestalt, attention, visual hierarchy
 │   ├── layout_composition.md          ← Grids, white space, canvas scaling
@@ -297,11 +306,14 @@ the-designer/
 │   ├── design_laws.md                 ← Hick's, Fitts's, Von Restorff, Golden Ratio
 │   └── design_qa.md                   ← 6-layer QA checklist
 │
-├── tests/
+├── tests/                             ← 142 tests
+│   ├── conftest.py                    ← Shared fixtures + factory functions
 │   ├── test_models.py                 ← 36 contract validation tests
 │   ├── test_color_utils.py            ← 22 WCAG contrast tests
 │   ├── test_validator.py              ← 11 QA pass tests
-│   └── test_cross_validation.py       ← 10 upstream + tool tests
+│   ├── test_cross_validation.py       ← 11 upstream + tool tests
+│   ├── test_new_validators.py         ← 30 new validator check tests
+│   └── test_tools_and_agent.py        ← 32 tool + agent scope tests
 │
 └── specs/                             ← Designer output (auto-created at runtime)
 ```
@@ -324,7 +336,7 @@ python -m pytest tests/test_models.py::TestTextElement -v
 python -m pytest tests/test_color_utils.py -v
 ```
 
-### What's Tested (80 Tests)
+### What's Tested (142 Tests)
 
 - ✅ Canvas scaling ×3 enforcement (mismatch → `ValidationError`)
 - ✅ WCAG AA contrast ratio calculation (black/white = 21:1)

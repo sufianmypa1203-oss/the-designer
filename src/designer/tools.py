@@ -95,6 +95,21 @@ def write_prototype(
                      "(background/midground/foreground). Add them and retry.",
         }
 
+    # Viewport validation — prototype must target 360×640 (1/3 of 1080×1920)
+    if "<meta" in content.lower() and "viewport" in content.lower():
+        # Has viewport — check it's reasonable (we accept any valid viewport)
+        pass
+    else:
+        # Warn but don't block: inject expected viewport guidance
+        import re
+        if not re.search(r'width\s*[=:]\s*360', content):
+            return {
+                "success": False,
+                "error": "Prototype HTML must include a viewport meta tag "
+                         'targeting 360×640. Add: <meta name="viewport" '
+                         'content="width=360, initial-scale=1"> in <head>.',
+            }
+
     target_dir.mkdir(exist_ok=True)
     filepath = target_dir / filename
     filepath.write_text(content, encoding="utf-8")

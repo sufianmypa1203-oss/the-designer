@@ -60,7 +60,8 @@ class TestValidateUpstream:
 class TestWritePrototype:
     def test_valid_prototype(self, mock_project):
         _, _, protos = mock_project
-        html = '<div data-element-id="el-1" data-layer="foreground">Hello</div>'
+        html = ('<meta name="viewport" content="width=360, initial-scale=1">'
+                '<div data-element-id="el-1" data-layer="foreground">Hello</div>')
         result = write_prototype("Scene1_Hook.html", html, prototypes_dir=protos)
         assert result["success"] is True
 
