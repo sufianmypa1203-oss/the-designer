@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "the-designer"
+version = "1.0.0"
+description = "Visual design specification agent — HTML prototypes, Pydantic-enforced design contracts, WCAG validation, 6-layer QA"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Sufian" },
+]
+keywords = [
+    "ai-agent",
+    "visual-design",
+    "video-pipeline",
+    "pydantic",
+    "claude-agent-sdk",
+    "motion-graphics",
+    "remotion",
+    "wcag",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+sdk = [
+    "claude-agent-sdk>=0.1.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/sufianmypa1203-oss/the-designer"
+Documentation = "https://github.com/sufianmypa1203-oss/the-designer#readme"
+Repository = "https://github.com/sufianmypa1203-oss/the-designer"
+Issues = "https://github.com/sufianmypa1203-oss/the-designer/issues"
+
+[project.scripts]
+designer = "designer.agent:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
+ignore = ["E501"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/designer"]
