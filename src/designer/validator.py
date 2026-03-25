@@ -2,7 +2,7 @@
 The Designer — DesignValidator (Evaluator-Optimizer Loop)
 
 A SEPARATE evaluation pass that validates generated design artifacts.
-12 deterministic checks + LLM evaluator for semantic/visual quality.
+15 deterministic checks + LLM evaluator (scored 0-10 per dimension).
 """
 from __future__ import annotations
 import json
@@ -47,8 +47,8 @@ class ValidationIssue:
 class DesignValidator:
     """
     Two-phase validation:
-    1. Deterministic (Pydantic schema + WCAG + scaling) — no LLM needed
-    2. Semantic (LLM evaluator call) — visual quality, emotion alignment
+    1. Deterministic (15 checks: Pydantic schema + WCAG + scaling) — no LLM needed
+    2. Semantic (LLM evaluator call) — visual quality, emotion alignment (scored 0-10)
 
     Returns structured issues that feed directly into the optimizer pass.
     """
@@ -108,7 +108,6 @@ class DesignValidator:
             ))
             return issues
 
-        # Basic structural checks without importing Director models
         if "scenes" not in raw:
             issues.append(ValidationIssue(
                 severity="CRITICAL",
@@ -293,7 +292,6 @@ class DesignValidator:
 
         upstream_ids = {s.get("id") for s in scene_map.get("scenes", [])}
 
-        # Cross-check each Designer spec
         for spec_path, spec_name, key in [
             (visual_spec_path, "visual-design-spec", "scenes"),
             (typo_spec_path, "typography-spec", "scenes"),
@@ -345,7 +343,6 @@ class DesignValidator:
         except (json.JSONDecodeError, OSError):
             return issues
 
-        # Find hook/shock scene IDs
         hook_ids = {
             s.get("id") for s in scene_map.get("scenes", [])
             if s.get("role") in ("hook", "shock")
@@ -366,10 +363,10 @@ class DesignValidator:
 
         return issues
 
-    # ── Check 9: Color Count Per Scene ───────────────────────────────────
+    # ── Check 9: Color Count Per Scene (FIXED — detects duplicates) ──────
 
     def validate_color_count(self) -> list[ValidationIssue]:
-        """No more than 3 colors per scene."""
+        """Detect duplicate colors across 60-30-10 roles (no visual separation)."""
         issues: list[ValidationIssue] = []
         visual_spec_path = self.specs_dir / "04-visual-design-spec.json"
 
@@ -383,36 +380,299 @@ class DesignValidator:
 
         for scene in data.get("scenes", []):
             colors_data = scene.get("colors", {})
-            unique_colors = {
+            color_values = [
                 colors_data.get("dominant_60", "").upper(),
                 colors_data.get("secondary_30", "").upper(),
                 colors_data.get("accent_10", "").upper(),
-            }
-            unique_colors.discard("")
-            if len(unique_colors) > 3:
+            ]
+            color_values = [c for c in color_values if c]
+
+            # Check if any two colors are identical (no visual separation)
+            unique_colors = set(color_values)
+            if len(color_values) >= 2 and len(unique_colors) < len(color_values):
+                duplicates = [c for c in color_values if color_values.count(c) > 1]
                 issues.append(ValidationIssue(
-                    severity="MEDIUM",
+                    severity="HIGH",
                     source="COLOR",
-                    message=f"[{scene.get('scene_id')}] {len(unique_colors)} unique colors (max 3)",
-                    fix_hint="Reduce to 3 colors max per scene",
+                    message=f"[{scene.get('scene_id')}] Duplicate colors in 60-30-10 roles: "
+                            f"{set(duplicates)} — no visual separation between roles",
+                    fix_hint="Each color role (60/30/10) must use a distinct color",
                 ))
+
+        return issues
+
+    # ── Check 10: Live WCAG Contrast Recalculation ───────────────────────
+
+    def validate_contrast_recalc(self) -> list[ValidationIssue]:
+        """Re-calculate contrast ratios from raw hex values and verify against WCAG AA."""
+        issues: list[ValidationIssue] = []
+        visual_spec_path = self.specs_dir / "04-visual-design-spec.json"
+        typo_spec_path = self.specs_dir / "05-typography-spec.json"
+
+        if not visual_spec_path.exists() or not typo_spec_path.exists():
+            return issues
+
+        try:
+            visual_data = json.loads(visual_spec_path.read_text())
+            typo_data = json.loads(typo_spec_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return issues
+
+        # Build scene → background color map
+        scene_bg: dict[str, str] = {}
+        for scene in visual_data.get("scenes", []):
+            colors = scene.get("colors", {})
+            bg = colors.get("dominant_60", "")
+            if bg and is_valid_hex(bg):
+                scene_bg[scene.get("scene_id", "")] = bg
+
+        # Check every text element's color against its scene background
+        for scene in typo_data.get("scenes", []):
+            sid = scene.get("scene_id", "")
+            bg_color = scene_bg.get(sid)
+            if not bg_color:
+                continue
+
+            for element in scene.get("elements", []):
+                text_color = element.get("color", "")
+                if not is_valid_hex(text_color):
+                    continue
+
+                actual_ratio = contrast_ratio(text_color, bg_color)
+                if actual_ratio < 4.5:
+                    issues.append(ValidationIssue(
+                        severity="CRITICAL",
+                        source="CONTRAST",
+                        message=f"[{sid}] '{element.get('element_id')}' "
+                                f"contrast {actual_ratio:.1f}:1 "
+                                f"(text {text_color} on bg {bg_color}). "
+                                f"WCAG AA requires ≥4.5:1",
+                        fix_hint="Change text color or background to increase contrast",
+                    ))
+
+        return issues
+
+    # ── Check 11: Canvas Scaling ×3 Spot-Check ───────────────────────────
+
+    def validate_canvas_scaling_spotcheck(self) -> list[ValidationIssue]:
+        """Re-verify canvas = prototype × 3 for typography AND manifest elements."""
+        issues: list[ValidationIssue] = []
+
+        # Check typography spec font sizes
+        typo_path = self.specs_dir / "05-typography-spec.json"
+        if typo_path.exists():
+            try:
+                typo_data = json.loads(typo_path.read_text())
+                for scene in typo_data.get("scenes", []):
+                    for el in scene.get("elements", []):
+                        proto = el.get("font_size_prototype", 0)
+                        canvas = el.get("font_size_canvas", 0)
+                        if proto > 0 and canvas != proto * 3:
+                            issues.append(ValidationIssue(
+                                severity="CRITICAL",
+                                source="SCALING",
+                                message=f"[{scene.get('scene_id')}] "
+                                        f"'{el.get('element_id')}' "
+                                        f"font_size_canvas={canvas} ≠ "
+                                        f"{proto} × 3 = {proto * 3}",
+                                fix_hint="Set font_size_canvas to "
+                                         "font_size_prototype × 3",
+                            ))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Check manifest element positions
+        manifest_path = self.specs_dir / "06-prototype-manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest_data = json.loads(manifest_path.read_text())
+                for proto in manifest_data.get("prototypes", []):
+                    for el in proto.get("elements", []):
+                        for dim in ["x", "y", "width", "height"]:
+                            proto_val = el.get(dim, 0)
+                            canvas_val = el.get(f"canvas_{dim}", 0)
+                            if proto_val > 0 and canvas_val != proto_val * 3:
+                                issues.append(ValidationIssue(
+                                    severity="CRITICAL",
+                                    source="SCALING",
+                                    message=f"[{proto.get('scene_id')}] "
+                                            f"'{el.get('element_id')}' "
+                                            f"canvas_{dim}={canvas_val} ≠ "
+                                            f"{dim}={proto_val} × 3 = "
+                                            f"{proto_val * 3}",
+                                    fix_hint=f"Set canvas_{dim} to "
+                                             f"{dim} × 3",
+                                ))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        return issues
+
+    # ── Check 12: Depth Layers ≥2 Per Scene ──────────────────────────────
+
+    def validate_depth_layers(self) -> list[ValidationIssue]:
+        """Every scene must have ≥2 depth layers with distinct z-indices."""
+        issues: list[ValidationIssue] = []
+        visual_spec_path = self.specs_dir / "04-visual-design-spec.json"
+
+        if not visual_spec_path.exists():
+            return issues
+
+        try:
+            data = json.loads(visual_spec_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return issues
+
+        for scene in data.get("scenes", []):
+            sid = scene.get("scene_id", "?")
+            layers = scene.get("depth_layers", [])
+
+            if len(layers) < 2:
+                issues.append(ValidationIssue(
+                    severity="CRITICAL",
+                    source="DEPTH",
+                    message=f"[{sid}] Only {len(layers)} depth layer(s) "
+                            f"— minimum 2 required",
+                    fix_hint="Add background + foreground layers minimum",
+                ))
+                continue
+
+            z_indices = [dl.get("z_index", 0) for dl in layers]
+            if len(set(z_indices)) < 2:
+                issues.append(ValidationIssue(
+                    severity="HIGH",
+                    source="DEPTH",
+                    message=f"[{sid}] All depth layers have same "
+                            f"z_index={z_indices[0]} — no visual depth",
+                    fix_hint="Use distinct z_index values for each layer",
+                ))
+
+        return issues
+
+    # ── Check 13: Weight Contrast ≥300 Cross-Check ───────────────────────
+
+    def validate_weight_contrast(self) -> list[ValidationIssue]:
+        """Re-verify weight contrast (max − min ≥ 300) per scene."""
+        issues: list[ValidationIssue] = []
+        typo_path = self.specs_dir / "05-typography-spec.json"
+
+        if not typo_path.exists():
+            return issues
+
+        try:
+            data = json.loads(typo_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return issues
+
+        for scene in data.get("scenes", []):
+            sid = scene.get("scene_id", "?")
+            elements = scene.get("elements", [])
+            weights = [e.get("font_weight", 400) for e in elements]
+
+            if len(weights) >= 2:
+                diff = max(weights) - min(weights)
+                if diff < 300:
+                    issues.append(ValidationIssue(
+                        severity="HIGH",
+                        source="TYPOGRAPHY",
+                        message=f"[{sid}] Weight contrast {diff} "
+                                f"(weights: {sorted(set(weights))}). "
+                                f"Minimum 300 for hierarchy.",
+                        fix_hint="Increase weight spread — e.g., 900 vs 400",
+                    ))
+
+        return issues
+
+    # ── Check 14: Element IDs Globally Unique ────────────────────────────
+
+    def validate_element_ids_unique(self) -> list[ValidationIssue]:
+        """Element IDs must be unique across ALL prototypes in manifest."""
+        issues: list[ValidationIssue] = []
+        manifest_path = self.specs_dir / "06-prototype-manifest.json"
+
+        if not manifest_path.exists():
+            return issues
+
+        try:
+            data = json.loads(manifest_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return issues
+
+        all_ids: list[str] = []
+        for proto in data.get("prototypes", []):
+            for el in proto.get("elements", []):
+                eid = el.get("element_id", "")
+                if eid:
+                    all_ids.append(eid)
+
+        if len(all_ids) != len(set(all_ids)):
+            dupes = {eid for eid in all_ids if all_ids.count(eid) > 1}
+            issues.append(ValidationIssue(
+                severity="CRITICAL",
+                source="ELEMENT_ID",
+                message=f"Duplicate element IDs across prototypes: {dupes}",
+                fix_hint="Every element ID must be globally unique",
+            ))
+
+        return issues
+
+    # ── Check 15: Text Matches Script ────────────────────────────────────
+
+    def validate_text_matches_script(self) -> list[ValidationIssue]:
+        """Cross-reference text_content in typography spec against script."""
+        issues: list[ValidationIssue] = []
+        script_path = self.specs_dir / "02-script.md"
+        typo_path = self.specs_dir / "05-typography-spec.json"
+
+        if not script_path.exists() or not typo_path.exists():
+            return issues
+
+        try:
+            script_text = script_path.read_text().lower()
+            typo_data = json.loads(typo_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return issues
+
+        for scene in typo_data.get("scenes", []):
+            for el in scene.get("elements", []):
+                text = el.get("text_content", "").strip()
+                role = el.get("role", "")
+                # Skip very short text (labels, badges) and counters
+                if len(text) < 4 or role in ("counter", "badge", "label"):
+                    continue
+                if text.lower() not in script_text:
+                    issues.append(ValidationIssue(
+                        severity="MEDIUM",
+                        source="SCRIPT_MATCH",
+                        message=f"[{scene.get('scene_id')}] Text "
+                                f"'{text[:50]}' not found in script "
+                                f"— was it invented?",
+                        fix_hint="Ensure all text comes from the "
+                                 "approved script",
+                    ))
 
         return issues
 
     # ── Master Validation ─────────────────────────────────────────────────
 
     def run_all_deterministic(self) -> list[ValidationIssue]:
-        """Run all deterministic validation passes. Returns combined issues."""
+        """Run all 15 deterministic validation passes."""
         all_issues: list[ValidationIssue] = []
-        all_issues.extend(self.validate_upstream_artifacts())
-        all_issues.extend(self.validate_scene_map_schema())
-        all_issues.extend(self.validate_prototype_coverage())
-        all_issues.extend(self.validate_visual_spec_schema())
-        all_issues.extend(self.validate_typography_spec_schema())
-        all_issues.extend(self.validate_manifest_schema())
-        all_issues.extend(self.validate_scene_id_consistency())
-        all_issues.extend(self.validate_focal_not_logo_in_hook())
-        all_issues.extend(self.validate_color_count())
+        all_issues.extend(self.validate_upstream_artifacts())       # 1
+        all_issues.extend(self.validate_scene_map_schema())         # 2
+        all_issues.extend(self.validate_prototype_coverage())       # 3
+        all_issues.extend(self.validate_visual_spec_schema())       # 4
+        all_issues.extend(self.validate_typography_spec_schema())   # 5
+        all_issues.extend(self.validate_manifest_schema())          # 6
+        all_issues.extend(self.validate_scene_id_consistency())     # 7
+        all_issues.extend(self.validate_focal_not_logo_in_hook())   # 8
+        all_issues.extend(self.validate_color_count())              # 9
+        all_issues.extend(self.validate_contrast_recalc())          # 10
+        all_issues.extend(self.validate_canvas_scaling_spotcheck()) # 11
+        all_issues.extend(self.validate_depth_layers())             # 12
+        all_issues.extend(self.validate_weight_contrast())          # 13
+        all_issues.extend(self.validate_element_ids_unique())       # 14
+        all_issues.extend(self.validate_text_matches_script())      # 15
         return all_issues
 
     def has_critical_issues(self, issues: list[ValidationIssue]) -> bool:
@@ -421,7 +681,7 @@ class DesignValidator:
     def format_report(self, issues: list[ValidationIssue]) -> str:
         """Format issues into a human-readable validation report."""
         if not issues:
-            return "✅ All design validations passed. Artifacts are clean."
+            return "✅ All 15 design validations passed. Artifacts are clean."
 
         report_lines = [
             f"## ⚠️ Design Validation Report — {len(issues)} Issue(s) Found\n",
@@ -446,7 +706,7 @@ class DesignValidator:
 
         return "\n".join(report_lines)
 
-    # ── LLM Evaluator Prompt Builder ──────────────────────────────────────
+    # ── LLM Evaluator — Scoring Mode (0-10 Per Dimension) ────────────────
 
     def build_llm_evaluator_prompt(
         self, brief: str, visual_spec: str, typography_spec: str
@@ -454,10 +714,11 @@ class DesignValidator:
         """
         Builds the prompt for the LLM evaluator pass.
         SEPARATE call — not the Designer reviewing its own work.
+        Returns a scored evaluation across 6 design dimensions.
+        Any dimension below 7 blocks handoff.
         """
-        return f"""You are a strict visual design evaluator.
-Evaluate these design specs against the brief and design laws.
-Return ONLY a JSON array of violation strings. Return [] if no violations.
+        return f"""You are a strict visual design evaluator for short-form vertical video (1080×1920).
+Score these design specs on 6 dimensions. Return ONLY a JSON object.
 
 BRIEF (brand colors, tone, energy):
 {brief[:2000]}
@@ -468,17 +729,24 @@ VISUAL DESIGN SPEC:
 TYPOGRAPHY SPEC:
 {typography_spec[:2000]}
 
-CHECK FOR:
-1. Color temperature mismatches (brief says "warm" but scene uses cool palette)
-2. Typography hierarchy breakdown (no clear size progression)
-3. Focal point competing with other elements (multiple high-contrast items)
-4. White space violations (elements too cramped, no relief zone)
-5. Brand color misuse (accent used > 10%, dominant < 50%)
-6. Depth layering absent (everything on same z-plane)
-7. Eye path unclear (squint test: can you identify ONE dominant element?)
-8. Shape consistency violations (mixed border radii, inconsistent angles)
-9. Text elements not from design system type scale
-10. Emotion mismatch (design feels energetic but brief calls for calm)
+SCORE EACH DIMENSION FROM 0-10:
+1. "color" — Does the palette serve the emotion? Is 60-30-10 applied? Any invented colors?
+2. "typography" — Weight contrast ≥300? Golden ratio ramp? Readable at 1080px? Tracking on CAPS?
+3. "focal" — ONE clear entry point per scene? Isolation technique applied? No competing elements?
+4. "depth" — ≥2 layers per scene? Z-index separation? Background blur for depth illusion?
+5. "emotion" — Does each scene's design match its intended emotion? Color temperature aligned?
+6. "craft" — Grain texture mentioned? Vignette? Clip reveals over fades? Relief zones present?
 
-Output format: ["violation 1", "violation 2"] or []
-Only output the JSON array — no explanation, no markdown."""
+Also provide a "violations" array of specific issues found.
+
+Output format (JSON only, no markdown):
+{{"color": 8, "typography": 9, "focal": 7, "depth": 8, "emotion": 6, "craft": 7, "violations": ["issue 1", "issue 2"]}}
+
+SCORING GUIDE:
+- 9-10: Production-ready, elite quality
+- 7-8: Good, minor polish needed
+- 5-6: Acceptable but has gaps
+- 3-4: Below standard, major issues
+- 0-2: Fundamentally broken
+
+Any dimension below 7 blocks handoff. Be strict."""
